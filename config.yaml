@@ -1,0 +1,27 @@
+
+firewalls:
+  - name: CiscoASA
+    type: cisco_asa
+    ip: 192.168.137.10
+    username: cisco
+    password: cisco
+    enable_password: ""
+
+  - name: FortiGate
+    type: fortios
+    ip: 192.168.137.20
+    username: cisco
+    password: cisco
+
+  - name: PaloAlto
+    type: paloalto
+    ip: 192.168.137.30
+    username: cisco
+    password: cisco
+
+
+zone_mappings:
+  INSIDE_ZONE:
+    - "CiscoASA:INSIDE"
+    - "FortiGate:port2"
+    - "PaloAlto:INSIDE"
