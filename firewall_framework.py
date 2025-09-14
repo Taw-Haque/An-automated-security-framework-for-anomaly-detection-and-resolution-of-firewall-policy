@@ -140,11 +140,12 @@ class FirewallFramework:
         else:
             logger.error("Framework execution failed.")
 
+
 class BaseConnector:
     def __init__(self, config: Dict):
         self.config = config
         self.ssh = None
-        self.timeout = 30
+        self.timeout = 120
 
     def connect(self):
         self.ssh = paramiko.SSHClient()
@@ -212,20 +213,61 @@ class CiscoASAConnector(BaseConnector):
         finally:
             self.disconnect()
 
+
 class PaloAltoConnector(BaseConnector):
     def get_config(self):
-        return self.get_full_config("set cli pager off", "show config running")
-
-class FortiOSConnector(BaseConnector):
-    def get_config(self):
+        
         try:
             self.connect()
             shell = self.ssh.invoke_shell()
-            time.sleep(1)
-            self.send_command(shell, "config system console")
-            self.send_command(shell, "set output standard")
-            self.send_command(shell, "end")
-            config = self.send_command(shell, "show full-configuration")
+            time.sleep(3) 
+
+            prompt = r'>\s*$'
+            self._wait_for_prompt(shell, prompt)
+            
+            self.send_command(shell, "set cli pager off", prompt)
+            
+            
+            config = self.send_command(shell, "show | display set", prompt)
+            
+            shell.close()
+            return config
+        finally:
+            self.disconnect()
+
+class FortiOSConnector(BaseConnector):
+    def get_config(self):
+        
+        try:
+            self.connect()
+            shell = self.ssh.invoke_shell()
+            
+            
+            time.sleep(15) 
+            
+           
+            shell.recv(65535)
+
+            
+            shell.send('config system console\n')
+            time.sleep(3)
+            shell.send('set output standard\n')
+            time.sleep(3)
+            shell.send('end\n')
+            time.sleep(3)
+
+           
+            shell.recv(65535)
+            
+            
+            shell.send('show full-configuration\n')
+            
+            
+            time.sleep(45)
+            
+           
+            config = shell.recv(999999).decode(errors='ignore')
+            
             shell.close()
             return config
         finally:
@@ -286,9 +328,13 @@ class CiscoASAParser(BaseParser):
              return start_idx + 2, f"{ip}/{cidr}"
         return start_idx + 1, keyword
 
+
+
 class PaloAltoParser(BaseParser):
     def parse(self, config_text: str) -> Dict:
         data = super().parse(config_text)
+        
+       
         addr_pattern = re.compile(r'set address "([^"]+)" (ip-netmask|ip-range|fqdn) "([^"]+)"')
         for name, _, value in addr_pattern.findall(config_text):
             data['addr_objects'][name] = value
@@ -308,10 +354,10 @@ class PaloAltoParser(BaseParser):
         
         for name, props in rules_dict.items():
             data['rules'].append({
-                'name': name, 'action': props.get('action', 'allow'), 'from_zone': props.get('from', ['any']),
-                'to_zone': props.get('to', ['any']), 'source': props.get('source', ['any']),
-                'destination': props.get('destination', ['any']), 'service': props.get('service', ['any']),
-                'raw_line': f"Rule '{name}'"
+                'name': name, 'action': props.get('action', 'allow'),
+                'from_zone': props.get('from', ['any']), 'to_zone': props.get('to', ['any']),
+                'source': props.get('source', ['any']), 'destination': props.get('destination', ['any']),
+                'service': props.get('service', ['any']), 'raw_line': f"Rule '{name}'"
             })
         return data
 
@@ -322,34 +368,28 @@ class FortiOSParser(BaseParser):
     def parse(self, config_text: str) -> Dict:
         data = super().parse(config_text)
         
-        addr_section = re.search(r'config firewall address\n(.*?)\nend', config_text, re.DOTALL)
-        if addr_section:
-            for name, content in re.findall(r'edit "([^"]+)"\n(.*?)(?=\nedit|\nend)', addr_section.group(1), re.DOTALL):
-                if 'set subnet' in content:
-                    ip, mask = re.search(r'set subnet (\S+) (\S+)', content).groups()
-                    data['addr_objects'][name] = f"{ip}/{IPAddress(mask).netmask_bits()}"
         
-        svc_section = re.search(r'config firewall service custom\n(.*?)\nend', config_text, re.DOTALL)
-        if svc_section:
-            for name, content in re.findall(r'edit "([^"]+)"\n(.*?)(?=\nedit|\nend)', svc_section.group(1), re.DOTALL):
-                match = re.search(r'set (tcp|udp)-portrange ([0-9-]+)', content)
-                if match: data['svc_objects'][name] = {'protocol': match.group(1), 'port': match.group(2)}
-        
-        policy_section = re.search(r'config firewall policy\n(.*?)\nend', config_text, re.DOTALL)
-        if policy_section:
-            for policy_id, content in re.findall(r'edit (\d+)\n(.*?)(?=\nedit|\nend)', policy_section.group(1), re.DOTALL):
+        policy_section_match = re.search(r'config firewall policy\n(.*?)\nend', config_text, re.DOTALL)
+        if policy_section_match:
+            policy_text = policy_section_match.group(1)
+            for policy_id, content in re.findall(r'edit (\d+)\n(.*?)(?=\nedit|\Z)', policy_text, re.DOTALL):
                 props = {}
                 for line in content.splitlines():
                     line = line.strip()
                     if line.startswith('set '):
-                        _, key, value = line.split(maxsplit=2)
+                        parts = line.split(maxsplit=2)
+                        if len(parts) < 3: continue
+                        _, key, value = parts
                         props[key] = self._parse_forti_list(line) if '"' in value else value
                 
                 data['rules'].append({
                     'name': props.get('name', f"policy-{policy_id}").strip('"'),
-                    'action': props.get('action', 'deny'), 'srcintf': props.get('srcintf', ['any']),
-                    'dstintf': props.get('dstintf', ['any']), 'srcaddr': props.get('srcaddr', ['any']),
-                    'dstaddr': props.get('dstaddr', ['any']), 'service': props.get('service', ['any']),
+                    'action': props.get('action', 'deny'),
+                    'srcintf': props.get('srcintf', ['any']),
+                    'dstintf': props.get('dstintf', ['any']),
+                    'srcaddr': props.get('srcaddr', ['any']),
+                    'dstaddr': props.get('dstaddr', ['any']),
+                    'service': props.get('service', ['any']),
                     'raw_line': f"Policy ID {policy_id}"
                 })
         return data
